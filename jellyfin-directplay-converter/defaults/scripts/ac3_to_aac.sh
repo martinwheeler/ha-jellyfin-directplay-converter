@@ -35,7 +35,7 @@ for ROOT in "${SCAN_PATHS[@]}"; do
 
       echo "$(date) converting: $f" >>"$LOG"
 
-      ffmpeg -y -i "$f" \
+      ffmpeg -y -nostdin -i "$f" \
         -f mp4 \
         -map 0:v:0 -map 0:a:0 -map 0:s? \
         -c:v copy \
