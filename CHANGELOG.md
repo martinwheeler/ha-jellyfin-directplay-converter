@@ -1,3 +1,7 @@
+# 0.1.5
+* Removed subtitle copy from ffmpeg as mp4 does not support it
+* Change lock file path as /tmp is not readable
+
 # 0.1.4
 * Added -nostdin to ffmpeg command to prevent logging the "Enter ..." input message
 

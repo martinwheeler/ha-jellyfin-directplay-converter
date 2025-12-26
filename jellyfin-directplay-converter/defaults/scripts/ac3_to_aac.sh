@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOCK="/tmp/ac3_to_aac.lock"
+LOCK="/share/jellyfin-media-tools/ac3_to_aac.lock"
 
 if [ -f "$LOCK" ]; then
-  exit 0
+  echo "Lock file exists, skipping"
+  echo 0
 fi
 
 touch "$LOCK"
@@ -19,6 +20,7 @@ SCAN_PATHS=()
 
 if [ "${#SCAN_PATHS[@]}" -eq 0 ]; then
   echo "$(date) no valid scan paths configured" >>"$LOG"
+  echo "$(date) no valid scan paths configured"
   exit 0
 fi
 
@@ -34,13 +36,13 @@ for ROOT in "${SCAN_PATHS[@]}"; do
       tmp="${out}.tmp"
 
       echo "$(date) converting: $f" >>"$LOG"
+      echo "$(date) converting: $f"
 
       ffmpeg -y -nostdin -i "$f" \
         -f mp4 \
-        -map 0:v:0 -map 0:a:0 -map 0:s? \
+        -map 0:v:0 -map 0:a:0 \
         -c:v copy \
         -c:a aac -b:a 192k -ac 2 \
-        -c:s copy \
         -movflags +faststart \
         "$tmp"
 
@@ -48,5 +50,6 @@ for ROOT in "${SCAN_PATHS[@]}"; do
       rm "$f"
 
       echo "$(date) done: $out" >>"$LOG"
+      echo "$(date) done: $out"
     done
 done
