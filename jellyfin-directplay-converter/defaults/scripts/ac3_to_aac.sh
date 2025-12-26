@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+LOCK="/tmp/ac3_to_aac.lock"
+
+if [ -f "$LOCK" ]; then
+  exit 0
+fi
+
+touch "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
 LOG="/share/jellyfin-media-tools/logs/ac3_to_aac.log"
 
 SCAN_PATHS=()
@@ -27,6 +36,7 @@ for ROOT in "${SCAN_PATHS[@]}"; do
       echo "$(date) converting: $f" >>"$LOG"
 
       ffmpeg -y -i "$f" \
+        -f mp4 \
         -map 0:v:0 -map 0:a:0 -map 0:s? \
         -c:v copy \
         -c:a aac -b:a 192k -ac 2 \
