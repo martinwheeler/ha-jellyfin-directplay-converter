@@ -1,7 +1,7 @@
 name: Jellyfin Direct Play Converter
 slug: jellyfin-directplay-converter
 description: Post-process media for Jellyfin (AC3→AAC, remuxing, etc)
-version: "0.1.5"
+version: "0.1.6"
 startup: services
 boot: auto
 init: false

@@ -19,16 +19,9 @@ echo "[INFO] Movies path: ${MOVIES_PATH}"
 echo "[INFO] TV path: ${TV_PATH}"
 
 # 🔑 Copy default scripts on first run only
-if [ -z "$(ls -A "$SCRIPT_DIR")" ]; then
-  echo "[INFO] No user scripts found, copying defaults"
-  cp -a "$DEFAULT_SCRIPT_DIR/." "$SCRIPT_DIR/"
-  chmod +x "$SCRIPT_DIR"/*.sh || true
-else
-  echo "[INFO] User scripts already present, not overwriting"
-fi
-
-echo "[INFO] Jellyfin Media Tools started"
-echo "[INFO] Scan interval: ${SCAN_INTERVAL} minutes"
+echo "[INFO] Updated scripts"
+cp -a "$DEFAULT_SCRIPT_DIR/." "$SCRIPT_DIR/"
+chmod +x "$SCRIPT_DIR"/*.sh || true
 
 while true; do
   echo "[INFO] $(date) running scripts" >>"$LOG_DIR/addon.log"
