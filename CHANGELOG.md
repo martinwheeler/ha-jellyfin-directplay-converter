@@ -1,3 +1,6 @@
+# 0.1.7
+* Reverted the 0.1.6 changes, restoring the 0.1.5 converter and script-copy behavior
+
 # 0.1.5
 * Removed subtitle copy from ffmpeg as mp4 does not support it
 * Change lock file path as /tmp is not readable
