@@ -1,10 +1,13 @@
 name: Jellyfin Direct Play Converter
 slug: jellyfin-directplay-converter
 description: Post-process media for Jellyfin (AC3→AAC, remuxing, etc)
-version: "0.1.7"
+version: "2.0.0"
 startup: services
 boot: auto
 init: false
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:play-circle-outline
 arch:
   - aarch64
   - armv7
@@ -13,10 +16,10 @@ map:
   - share:rw
   - media:rw
 options:
-  scan_interval: 15
+  scan_interval: 300
   movies_path: /share/jellyfin/movies
   tv_path: /share/jellyfin/tv
 schema:
-  scan_interval: int(5,1440)
+  scan_interval: int(300,86400)
   movies_path: str
   tv_path: str

@@ -14,7 +14,7 @@ DEFAULT_SCRIPT_DIR="/defaults/scripts"
 mkdir -p "$SCRIPT_DIR" "$LOG_DIR"
 
 echo "[INFO] Jellyfin Media Tools started"
-echo "[INFO] Scan interval: ${SCAN_INTERVAL} minutes"
+echo "[INFO] Scan interval: ${SCAN_INTERVAL} seconds"
 echo "[INFO] Movies path: ${MOVIES_PATH}"
 echo "[INFO] TV path: ${TV_PATH}"
 
@@ -27,18 +27,10 @@ else
   echo "[INFO] User scripts already present, not overwriting"
 fi
 
-echo "[INFO] Jellyfin Media Tools started"
-echo "[INFO] Scan interval: ${SCAN_INTERVAL} minutes"
-
-while true; do
-  echo "[INFO] $(date) running scripts" >>"$LOG_DIR/addon.log"
-
-  for script in "$SCRIPT_DIR"/*.sh; do
-    [ -x "$script" ] || continue
-    echo "[INFO] Running $script" >>"$LOG_DIR/addon.log"
-    MOVIES_PATH="$MOVIES_PATH" TV_PATH="$TV_PATH" \
-      "$script" >>"$LOG_DIR/addon.log" 2>&1 || true
-  done
-
-  sleep "$((SCAN_INTERVAL * 60))"
-done
+exec python3 /app.py \
+  --scan-interval "$SCAN_INTERVAL" \
+  --movies-path "$MOVIES_PATH" \
+  --tv-path "$TV_PATH" \
+  --script-dir "$SCRIPT_DIR" \
+  --log-dir "$LOG_DIR" \
+  --cache-path /data/media_status.json

@@ -1,3 +1,9 @@
+# 2.0.0
+* Added a Home Assistant Ingress status page with a manual Run now control
+* Added worker state, last-run result, media counts, search, and status/type filters
+* Added cached movie and TV media discovery with audio codec and conversion status reporting
+* Changed scan intervals from minutes to seconds, with a default of 300 seconds
+
 # 0.1.7
 * Reverted the 0.1.6 changes, restoring the 0.1.5 converter and script-copy behavior
 
