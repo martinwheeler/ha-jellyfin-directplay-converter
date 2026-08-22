@@ -1,3 +1,6 @@
+# 2.0.1
+* Fixed builds on Home Assistant Supervisor 2026.04 and newer by using an explicit multi-architecture base image
+
 # 2.0.0
 * Added a Home Assistant Ingress status page with a manual Run now control
 * Added worker state, last-run result, media counts, search, and status/type filters
