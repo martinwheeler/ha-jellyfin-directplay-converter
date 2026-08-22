@@ -17,15 +17,15 @@ from urllib.parse import urlsplit
 
 
 INGRESS_PROXY_IP = "172.30.32.2"
-VIDEO_SUFFIXES = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 STATUS_LABELS = {
-    "needs_conversion": "Needs conversion",
-    "converting": "Converting",
-    "converted": "Converted",
-    "no_ac3": "No AC3",
-    "no_audio": "No audio",
-    "probe_failed": "Probe failed",
+    "pending": "Pending",
+    "reviewed_pending": "Review required",
+    "reviewed_process": "Approved",
+    "in_progress": "In progress",
+    "done": "Done",
+    "done_existing": "Existing",
     "failed": "Failed",
+    "other": "Other",
 }
 
 
@@ -41,22 +41,26 @@ class ScanController:
         tv_path: str,
         script_dir: Path,
         log_dir: Path,
-        cache_path: Path,
+        queue_path: Path,
     ) -> None:
         self.scan_interval = scan_interval
         self.movies_path = movies_path
         self.tv_path = tv_path
         self.script_dir = script_dir
         self.log_path = log_dir / "addon.log"
-        self.cache_path = cache_path
+        self.queue_path = queue_path
         self.trigger = threading.Event()
         self.state_lock = threading.Lock()
+        self.queue_refresh_lock = threading.Lock()
         self.state = "starting"
         self.last_started: str | None = None
         self.last_finished: str | None = None
         self.last_result: str | None = None
-        self.media: dict[str, dict[str, object]] = self._load_cache()
-        self.media_revision = 1 if self.media else 0
+        self.media: list[dict[str, object]] = []
+        self.media_revision = 0
+        self.queue_signature: tuple[int, int, int] | None = None
+        self.queue_exists = False
+        self.queue_error: str | None = None
 
     def request_scan(self) -> bool:
         already_queued = self.trigger.is_set()
@@ -64,9 +68,10 @@ class ScanController:
         return not already_queued
 
     def status(self) -> dict[str, object]:
+        self._refresh_queue()
         with self.state_lock:
-            counts = Counter(str(item["status"]) for item in self.media.values())
-            type_counts = Counter(str(item["media_type"]) for item in self.media.values())
+            counts = Counter(str(item["status"]) for item in self.media)
+            type_counts = Counter(str(item["media_type"]) for item in self.media)
             return {
                 "state": self.state,
                 "queued": self.trigger.is_set(),
@@ -75,6 +80,9 @@ class ScanController:
                 "last_finished": self.last_finished,
                 "last_result": self.last_result,
                 "media_revision": self.media_revision,
+                "queue_path": str(self.queue_path),
+                "queue_exists": self.queue_exists,
+                "queue_error": self.queue_error,
                 "counts": {
                     "all": len(self.media),
                     "movies": type_counts.get("Movie", 0),
@@ -84,31 +92,16 @@ class ScanController:
             }
 
     def media_list(self) -> dict[str, object]:
+        self._refresh_queue()
         with self.state_lock:
-            public_keys = (
-                "path",
-                "relative_path",
-                "media_type",
-                "title",
-                "codec",
-                "status",
-                "status_label",
-            )
-            items = sorted(
-                ({key: item[key] for key in public_keys} for item in self.media.values()),
-                key=lambda item: (
-                    str(item["media_type"]),
-                    str(item["title"]).casefold(),
-                    str(item["path"]).casefold(),
-                ),
-            )
+            items = [dict(item) for item in self.media]
             return {"revision": self.media_revision, "items": items}
 
     def run_forever(self) -> None:
         while True:
-            self._discover_media()
-            failed_paths = self._run_scripts()
-            self._discover_media(failed_paths)
+            self._refresh_queue(force=True)
+            self._run_scripts()
+            self._refresh_queue(force=True)
 
             with self.state_lock:
                 self.state = "waiting"
@@ -118,96 +111,112 @@ class ScanController:
             if triggered:
                 self.trigger.clear()
 
-    def _discover_media(self, failed_paths: set[str] | None = None) -> None:
-        with self.state_lock:
-            self.state = "scanning"
-            cached = dict(self.media)
+    def _refresh_queue(self, force: bool = False) -> None:
+        with self.queue_refresh_lock:
+            try:
+                stat = self.queue_path.stat()
+                signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+            except FileNotFoundError:
+                with self.state_lock:
+                    changed = self.queue_exists or bool(self.media)
+                    self.queue_exists = False
+                    self.queue_error = f"Queue file not found: {self.queue_path}"
+                    self.queue_signature = None
+                    self.media = []
+                    if changed:
+                        self.media_revision += 1
+                return
+            except OSError as exc:
+                with self.state_lock:
+                    self.queue_error = f"Could not inspect queue: {exc}"
+                return
 
-        discovered: dict[str, dict[str, object]] = {}
-        roots = (("TV", self.tv_path), ("Movie", self.movies_path))
-        for media_type, root_value in roots:
-            root = Path(root_value)
-            if not root.is_dir():
-                continue
-            for directory, _, filenames in os.walk(root):
-                for filename in filenames:
-                    path = Path(directory) / filename
-                    if path.suffix.casefold() not in VIDEO_SUFFIXES or filename.endswith(".tmp"):
-                        continue
-                    try:
-                        stat = path.stat()
-                        relative = path.relative_to(root)
-                    except (FileNotFoundError, OSError, ValueError):
-                        continue
+            with self.state_lock:
+                if not force and self.queue_signature == signature:
+                    return
 
-                    path_text = str(path)
-                    previous = cached.get(path_text)
-                    if (
-                        previous
-                        and previous.get("mtime_ns") == stat.st_mtime_ns
-                        and previous.get("size") == stat.st_size
-                        and previous.get("codec") is not None
-                    ):
-                        codec = str(previous["codec"])
-                        probe_error = bool(previous.get("probe_error"))
-                    else:
-                        codec, probe_error = self._probe_audio(path)
+            try:
+                rows = self._read_queue_rows()
+            except OSError as exc:
+                with self.state_lock:
+                    self.queue_exists = True
+                    self.queue_error = f"Could not read queue: {exc}"
+                return
 
-                    status = self._media_status(codec, probe_error)
-                    if failed_paths and path_text in failed_paths:
-                        status = "failed"
-                    title = relative.parts[0] if len(relative.parts) > 1 else path.stem
-                    discovered[path_text] = {
-                        "path": path_text,
-                        "relative_path": str(relative),
-                        "media_type": media_type,
-                        "title": title,
-                        "codec": codec,
-                        "status": status,
-                        "status_label": STATUS_LABELS[status],
-                        "mtime_ns": stat.st_mtime_ns,
-                        "size": stat.st_size,
-                        "probe_error": probe_error,
-                    }
+            with self.state_lock:
+                self.media = rows
+                self.queue_exists = True
+                self.queue_error = None
+                self.queue_signature = signature
+                self.media_revision += 1
 
-        with self.state_lock:
-            self.media = discovered
-            self.media_revision += 1
-        self._save_cache(discovered)
-
-    def _probe_audio(self, path: Path) -> tuple[str, bool]:
-        try:
-            result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error", "-select_streams", "a:0",
-                    "-show_entries", "stream=codec_name",
-                    "-of", "default=noprint_wrappers=1:nokey=1", str(path),
-                ],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return "unknown", True
-
-        codec = result.stdout.strip().splitlines()
-        if result.returncode != 0:
-            return "unknown", True
-        return (codec[0].casefold() if codec else "", False)
+    def _read_queue_rows(self) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        with self.queue_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                raw_line = raw_line.rstrip("\r\n")
+                if not raw_line:
+                    continue
+                if "\t" in raw_line:
+                    raw_status, path = raw_line.split("\t", 1)
+                else:
+                    raw_status, path = "MALFORMED", raw_line
+                status = self._queue_status(raw_status)
+                media_type, title, relative_path = self._path_details(path)
+                rows.append({
+                    "line": line_number,
+                    "path": path,
+                    "relative_path": relative_path,
+                    "media_type": media_type,
+                    "title": title,
+                    "status": status,
+                    "status_label": STATUS_LABELS[status],
+                    "status_detail": raw_status,
+                })
+        return rows
 
     @staticmethod
-    def _media_status(codec: str, probe_error: bool) -> str:
-        if probe_error:
-            return "probe_failed"
-        if not codec:
-            return "no_audio"
-        if codec == "ac3":
-            return "needs_conversion"
-        return "no_ac3"
+    def _queue_status(raw_status: str) -> str:
+        if raw_status == "PENDING":
+            return "pending"
+        if raw_status == "REVIEWED:PENDING":
+            return "reviewed_pending"
+        if raw_status == "REVIEWED:PROCESS":
+            return "reviewed_process"
+        if raw_status == "IN_PROGRESS" or raw_status.startswith("IN_PROGRESS:"):
+            return "in_progress"
+        if raw_status == "DONE":
+            return "done"
+        if raw_status == "DONE:EXISTING":
+            return "done_existing"
+        if raw_status == "FAILED" or raw_status.startswith("FAILED:"):
+            return "failed"
+        return "other"
 
-    def _run_scripts(self) -> set[str]:
+    def _path_details(self, path: str) -> tuple[str, str, str]:
+        media_path = Path(path)
+        for media_type, root_value in (("TV", self.tv_path), ("Movie", self.movies_path)):
+            try:
+                relative = media_path.relative_to(Path(root_value))
+            except ValueError:
+                continue
+            title = relative.parts[0] if len(relative.parts) > 1 else media_path.stem
+            return media_type, title, str(relative)
+
+        path_parts = media_path.parts
+        if "tv" in path_parts:
+            index = path_parts.index("tv")
+            relative_parts = path_parts[index + 1 :]
+            title = relative_parts[0] if len(relative_parts) > 1 else media_path.stem
+            return "TV", title, str(Path(*relative_parts))
+        if "movies" in path_parts:
+            index = path_parts.index("movies")
+            relative_parts = path_parts[index + 1 :]
+            title = relative_parts[0] if len(relative_parts) > 1 else media_path.stem
+            return "Movie", title, str(Path(*relative_parts))
+        return "Other", media_path.stem or path, path
+
+    def _run_scripts(self) -> None:
         with self.state_lock:
             self.state = "running"
             self.last_started = now_iso()
@@ -216,7 +225,6 @@ class ScanController:
         env = os.environ.copy()
         env["MOVIES_PATH"] = self.movies_path
         env["TV_PATH"] = self.tv_path
-        failed_paths: set[str] = set()
         scripts_failed = False
 
         with self.log_path.open("a", encoding="utf-8") as log:
@@ -225,82 +233,24 @@ class ScanController:
                 if not os.access(script, os.X_OK):
                     continue
                 print(f"[INFO] Running {script}", file=log, flush=True)
-                active_path: str | None = None
                 try:
-                    process = subprocess.Popen(
+                    result = subprocess.run(
                         [str(script)],
                         env=env,
-                        stdout=subprocess.PIPE,
+                        stdout=log,
                         stderr=subprocess.STDOUT,
-                        text=True,
-                        errors="replace",
-                        bufsize=1,
+                        check=False,
                     )
-                    assert process.stdout is not None
-                    for line in process.stdout:
-                        log.write(line)
-                        log.flush()
-                        if "converting: " in line:
-                            active_path = line.split("converting: ", 1)[1].strip()
-                            self._set_media_status(active_path, "converting")
-                        elif "done: " in line:
-                            if active_path:
-                                self._set_media_status(active_path, "converted")
-                            active_path = None
-                    return_code = process.wait()
+                    return_code = result.returncode
                 except OSError as exc:
                     print(f"[ERROR] Could not run {script}: {exc}", file=log, flush=True)
                     return_code = 1
 
                 if return_code != 0:
                     scripts_failed = True
-                    if active_path:
-                        failed_paths.add(active_path)
 
         with self.state_lock:
             self.last_result = "failed" if scripts_failed else "success"
-        return failed_paths
-
-    def _set_media_status(self, path: str, status: str) -> None:
-        with self.state_lock:
-            item = self.media.get(path)
-            if not item:
-                return
-            item["status"] = status
-            item["status_label"] = STATUS_LABELS[status]
-            self.media_revision += 1
-
-    def _load_cache(self) -> dict[str, dict[str, object]]:
-        try:
-            payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
-            items = payload.get("items", [])
-            if not isinstance(items, list):
-                return {}
-            required = {
-                "path",
-                "relative_path",
-                "media_type",
-                "title",
-                "codec",
-                "status",
-                "status_label",
-            }
-            return {
-                str(item["path"]): item
-                for item in items
-                if isinstance(item, dict) and required.issubset(item)
-            }
-        except (FileNotFoundError, OSError, ValueError, TypeError):
-            return {}
-
-    def _save_cache(self, media: dict[str, dict[str, object]]) -> None:
-        temp_path = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
-        try:
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path.write_text(json.dumps({"items": list(media.values())}), encoding="utf-8")
-            temp_path.replace(self.cache_path)
-        except OSError as exc:
-            print(f"[WARNING] Could not save media status cache: {exc}")
 
 
 HTML_PAGE = r"""<!doctype html>
@@ -336,12 +286,12 @@ HTML_PAGE = r"""<!doctype html>
     tr:hover td { background: rgba(127,143,166,.08); }
     .type, .status { display: inline-block; white-space: nowrap; padding: 3px 8px; border-radius: 999px; font-size: .78rem; font-weight: 700; }
     .type { background: #536dfe22; color: #91a1ff; }
-    .needs_conversion { background: #ff980022; color: #ffb74d; }
-    .converting { background: #03a9f422; color: #4fc3f7; }
-    .converted { background: #8bc34a22; color: #aed581; }
-    .no_ac3 { background: #4caf5022; color: #81c784; }
-    .no_audio { background: #78909c22; color: #b0bec5; }
-    .probe_failed, .failed { background: #f4433622; color: #ef9a9a; }
+    .pending { background: #ff980022; color: #ffb74d; }
+    .reviewed_pending { background: #ffc10722; color: #ffd54f; }
+    .reviewed_process { background: #7e57c222; color: #b39ddb; }
+    .in_progress { background: #03a9f422; color: #4fc3f7; }
+    .done, .done_existing { background: #4caf5022; color: #81c784; }
+    .failed, .other { background: #f4433622; color: #ef9a9a; }
     .title { font-weight: 650; }
     .path { max-width: 680px; color: var(--muted); overflow-wrap: anywhere; }
     .empty { padding: 36px 24px; text-align: center; color: var(--muted); }
@@ -359,14 +309,14 @@ HTML_PAGE = r"""<!doctype html>
     <div class="content">
       <div class="toolbar">
         <select id="status-filter" aria-label="Filter by status">
-          <option value="all">All statuses</option><option value="needs_conversion">Needs conversion</option><option value="converting">Converting</option><option value="converted">Converted</option><option value="no_ac3">No AC3</option><option value="failed">Failed</option><option value="probe_failed">Probe failed</option><option value="no_audio">No audio</option>
+          <option value="all">All statuses</option><option value="pending">Pending</option><option value="reviewed_pending">Review required</option><option value="reviewed_process">Approved</option><option value="in_progress">In progress</option><option value="done">Done</option><option value="done_existing">Existing</option><option value="failed">Failed</option><option value="other">Other</option>
         </select>
-        <select id="type-filter" aria-label="Filter by media type"><option value="all">Movies + TV</option><option value="Movie">Movies</option><option value="TV">TV</option></select>
+        <select id="type-filter" aria-label="Filter by media type"><option value="all">All media</option><option value="Movie">Movies</option><option value="TV">TV</option><option value="Other">Other</option></select>
         <input id="search" type="search" placeholder="Search titles or paths" aria-label="Search titles or paths">
       </div>
       <div class="table-wrap">
-        <table><thead><tr><th>Type</th><th>Title</th><th>Status</th><th>Audio</th><th class="path-column">Path</th></tr></thead><tbody id="rows"></tbody></table>
-        <div class="empty" id="empty" hidden>No media matches the current filters.</div>
+        <table><thead><tr><th>Line</th><th>Type</th><th>Title</th><th>Status</th><th class="path-column">Path</th></tr></thead><tbody id="rows"></tbody></table>
+        <div class="empty" id="empty" hidden>No queue rows match the current filters.</div>
       </div>
     </div>
   </main>
@@ -379,18 +329,20 @@ HTML_PAGE = r"""<!doctype html>
     function displayTime(value) { return value ? new Date(value).toLocaleString() : 'never'; }
     async function fetchJson(endpoint, options = {}) { const response = await fetch(basePath + endpoint, { cache: 'no-store', ...options }); if (!response.ok) throw new Error(`${response.status} ${response.statusText}`); return await response.json(); }
     function renderSummary(counts) {
-      const values = [['Files',counts.all],['Movies',counts.movies],['TV',counts.tv],['Needs conversion',counts.needs_conversion],['Converting',counts.converting],['Converted',counts.converted],['No AC3',counts.no_ac3],['Failed',counts.failed + counts.probe_failed]];
+      const values = [['Rows',counts.all],['Movies',counts.movies],['TV',counts.tv],['Pending',counts.pending],['Review',counts.reviewed_pending],['Approved',counts.reviewed_process],['Running',counts.in_progress],['Done',counts.done],['Existing',counts.done_existing],['Failed',counts.failed]];
       document.querySelector('#summary').innerHTML = values.map(([label,value]) => `<span class="pill">${escapeHtml(label)}: <strong>${escapeHtml(value || 0)}</strong></span>`).join('');
     }
     function renderRows() {
       const status = document.querySelector('#status-filter').value, type = document.querySelector('#type-filter').value, query = document.querySelector('#search').value.trim().toLowerCase();
       const visible = state.items.filter(item => (status === 'all' || item.status === status) && (type === 'all' || item.media_type === type) && (!query || item.title.toLowerCase().includes(query) || item.path.toLowerCase().includes(query)));
       document.querySelector('#empty').hidden = visible.length > 0;
-      document.querySelector('#rows').innerHTML = visible.map(item => `<tr><td><span class="type">${escapeHtml(item.media_type)}</span></td><td><span class="title">${escapeHtml(item.title)}</span><br><span class="path">${escapeHtml(item.relative_path)}</span></td><td><span class="status ${escapeHtml(item.status)}">${escapeHtml(item.status_label)}</span></td><td>${escapeHtml(item.codec || '—')}</td><td class="path path-column">${escapeHtml(item.path)}</td></tr>`).join('');
+      document.querySelector('#rows').innerHTML = visible.map(item => `<tr><td>${escapeHtml(item.line)}</td><td><span class="type">${escapeHtml(item.media_type)}</span></td><td><span class="title">${escapeHtml(item.title)}</span><br><span class="path">${escapeHtml(item.relative_path)}</span></td><td><span class="status ${escapeHtml(item.status)}" title="${escapeHtml(item.status_detail)}">${escapeHtml(item.status_label)}</span></td><td class="path path-column">${escapeHtml(item.path)}</td></tr>`).join('');
     }
     async function updateStatus() {
       const status = await fetchJson('api/status'), queued = status.queued ? ' · run queued' : '', result = status.last_result ? ` · last result ${status.last_result}` : '';
-      document.querySelector('#meta').textContent = `Worker ${status.state}${queued} · every ${status.scan_interval}s · last started ${displayTime(status.last_started)}${result}`;
+      const queueState = status.queue_exists ? `${status.counts.all} queue rows` : 'queue unavailable';
+      document.querySelector('#meta').textContent = `Worker ${status.state}${queued} · ${queueState} · every ${status.scan_interval}s · last started ${displayTime(status.last_started)}${result}`;
+      if (status.queue_error) message.textContent = status.queue_error;
       renderSummary(status.counts);
       if (status.media_revision !== state.revision) { const media = await fetchJson('api/media'); state.items = media.items; state.revision = media.revision; renderRows(); }
     }
@@ -468,7 +420,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tv-path", required=True)
     parser.add_argument("--script-dir", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)
-    parser.add_argument("--cache-path", type=Path, required=True)
+    parser.add_argument("--queue-path", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -480,7 +432,7 @@ def main() -> None:
         args.tv_path,
         args.script_dir,
         args.log_dir,
-        args.cache_path,
+        args.queue_path,
     )
     server = ThreadingHTTPServer(("0.0.0.0", 8099), make_handler(controller))
     threading.Thread(target=server.serve_forever, daemon=True).start()

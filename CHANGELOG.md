@@ -1,3 +1,7 @@
+# 2.0.3
+* Changed the Ingress dashboard to read `/share/jellyfin-media-tools/video_reencode_queue.tsv` as its status source
+* Added live queue refresh, queue-order display, worker status normalization, and Movie/TV path classification
+
 # 2.0.2
 * Allowed scan intervals as low as 1 second so existing configurations can update to the seconds-based scheduler
 

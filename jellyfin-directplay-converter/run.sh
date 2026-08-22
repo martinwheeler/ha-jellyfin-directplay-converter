@@ -33,4 +33,4 @@ exec python3 /app.py \
   --tv-path "$TV_PATH" \
   --script-dir "$SCRIPT_DIR" \
   --log-dir "$LOG_DIR" \
-  --cache-path /data/media_status.json
+  --queue-path /share/jellyfin-media-tools/video_reencode_queue.tsv
