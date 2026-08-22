@@ -1,3 +1,8 @@
+# 2.0.4
+* Replaced the bundled local AC3 converter with the media queue creator
+* Removed local ffmpeg processing because conversion is handled by the external worker
+* Removed obsolete Slow Horses prioritization remnants and used both configured media paths
+
 # 2.0.3
 * Changed the Ingress dashboard to read `/share/jellyfin-media-tools/video_reencode_queue.tsv` as its status source
 * Added live queue refresh, queue-order display, worker status normalization, and Movie/TV path classification
