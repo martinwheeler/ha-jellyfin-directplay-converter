@@ -1,3 +1,6 @@
+# 2.0.2
+* Allowed scan intervals as low as 1 second so existing configurations can update to the seconds-based scheduler
+
 # 2.0.1
 * Fixed builds on Home Assistant Supervisor 2026.04 and newer by using an explicit multi-architecture base image
 
